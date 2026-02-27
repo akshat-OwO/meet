@@ -13,7 +13,9 @@ export function selectionPage(
   meetings: MeetingEntry[],
   currentUserEmail: string | null,
   autoRedirect: boolean,
-  userAlias?: string | null
+  userAlias?: string | null,
+  orgDomain?: string | null,
+  showingPublic?: boolean
 ): string {
   // Strip emails before serializing to client
   const clientMeetings: ClientMeeting[] = meetings.map((m) => ({
@@ -22,11 +24,28 @@ export function selectionPage(
     isCurrentUser: currentUserEmail !== null && m.email === currentUserEmail,
   }));
 
-  const currentUserMeeting = clientMeetings.find((m) => m.isCurrentUser) ?? null;
+  const currentUserMeeting =
+    clientMeetings.find((m) => m.isCurrentUser) ?? null;
   const meetingsJson = JSON.stringify(clientMeetings);
   const autoRedirectUrl = currentUserMeeting ? currentUserMeeting.url : null;
 
   const isLoggedIn = currentUserEmail !== null;
+  const isEmpty = meetings.length === 0;
+
+  // Org favicon via Google's service
+  const faviconUrl = orgDomain
+    ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(orgDomain)}&sz=32`
+    : null;
+
+  // View toggle link: org users can switch between org and public views
+  let viewToggleHtml = "";
+  if (orgDomain && isLoggedIn) {
+    if (showingPublic) {
+      viewToggleHtml = `<a href="/" class="view-toggle">&larr; back to ${escapeHtml(orgDomain)}</a>`;
+    } else {
+      viewToggleHtml = `<a href="/?public=1" class="view-toggle">view public meetings &rarr;</a>`;
+    }
+  }
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -36,7 +55,15 @@ export function selectionPage(
   <title>Meet</title>
   <style>
     ${BASE_STYLES}
-    h1 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    h1 { font-size: 16px; font-weight: 600; }
+    .org-icon {
+      width: 24px; height: 24px; display: block;
+      border: 1px solid #e0e0e0; padding: 2px;
+    }
     .subtitle { font-size: 12px; color: #888; margin-bottom: 24px; }
     .meeting {
       display: flex; align-items: center; justify-content: space-between;
@@ -65,6 +92,7 @@ export function selectionPage(
       border: 1px solid #e0e0e0; background: #fff; color: #1a1a1a;
       border-radius: 0; cursor: pointer;
       transition: border-color 0.15s, background 0.15s;
+      text-align: center;
     }
     .btn:hover { border-color: #1a73e8; background: #f0f6ff; }
     .btn-primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
@@ -86,26 +114,71 @@ export function selectionPage(
       display: inline-block; padding: 2px 6px; background: #fff;
       border: 1px solid #e0e0e0; cursor: pointer; user-select: all;
     }
+    .view-toggle {
+      display: block; text-align: center; margin-top: 12px;
+      font-size: 11px; color: #888;
+    }
+    .view-toggle:hover { color: #1a73e8; }
+    .empty-state {
+      text-align: center; padding: 32px 0; color: #888; font-size: 13px;
+      line-height: 1.6;
+    }
+    .empty-state p { margin-bottom: 16px; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>meet</h1>
-    <p class="subtitle">${isLoggedIn ? `signed in as ${escapeHtml(currentUserEmail!)}` : "not signed in"}</p>
-
-    <div id="meetings"></div>
-
-    <p class="countdown" id="countdown"></p>
-
-    <div class="actions">
+    <div class="header">
+      <h1>meet</h1>
       ${
-        isLoggedIn
-          ? `<a href="/new" class="btn">new meeting</a>
-             <a href="/logout" class="btn">logout</a>`
-          : `<a href="/new" class="btn">create new</a>
-             <a href="/login" class="btn btn-primary">sign in</a>`
+        faviconUrl && orgDomain
+          ? `<a href="https://${escapeHtml(orgDomain)}" target="_blank" rel="noopener">
+               <img src="${escapeHtml(faviconUrl)}" alt="${escapeHtml(orgDomain)}" class="org-icon">
+             </a>`
+          : ""
       }
     </div>
+    <p class="subtitle">${
+      isLoggedIn
+        ? `signed in as ${escapeHtml(currentUserEmail!)}${
+            orgDomain && !showingPublic
+              ? ` &middot; ${escapeHtml(orgDomain)}`
+              : showingPublic
+                ? " &middot; public"
+                : ""
+          }`
+        : "not signed in"
+    }</p>
+
+    ${
+      isEmpty
+        ? `<div class="empty-state">
+             <p>no meetings yet${showingPublic ? " (public)" : ""}</p>
+             ${
+               !isLoggedIn
+                 ? `<a href="/login" class="btn btn-primary" style="display:inline-block;flex:none;padding:10px 24px;">sign in with google</a>`
+                 : ""
+             }
+           </div>`
+        : '<div id="meetings"></div>'
+    }
+
+    ${!isEmpty ? '<p class="countdown" id="countdown"></p>' : ""}
+
+    ${
+      isLoggedIn
+        ? `<div class="actions">
+             <a href="/new" class="btn">new meeting</a>
+             <a href="/logout" class="btn">logout</a>
+           </div>`
+        : !isEmpty
+          ? `<div class="actions">
+               <a href="/login" class="btn btn-primary">sign in</a>
+             </div>`
+          : ""
+    }
+
+    ${viewToggleHtml}
 
     ${
       userAlias
@@ -122,7 +195,9 @@ export function selectionPage(
 
   <div class="copied-toast" id="toast">link copied to clipboard</div>
 
-  <script>
+  ${
+    !isEmpty
+      ? `<script>
     const meetings = ${meetingsJson};
     const autoRedirectUrl = ${JSON.stringify(autoRedirectUrl)};
     const shouldAutoRedirect = ${autoRedirect && autoRedirectUrl ? "true" : "false"};
@@ -209,7 +284,22 @@ export function selectionPage(
 
     render();
     startAutoRedirect();
-  </script>
+  </script>`
+      : `<script>
+    function showToast(msg) {
+      const toast = document.getElementById("toast");
+      toast.textContent = msg || "link copied to clipboard";
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 1500);
+    }
+    function copyDirectLink() {
+      const el = document.getElementById("directLink");
+      if (!el) return;
+      const link = window.location.origin + el.textContent;
+      navigator.clipboard.writeText(link).then(() => showToast("direct link copied")).catch(() => {});
+    }
+  </script>`
+  }
 </body>
 </html>`;
 }

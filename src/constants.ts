@@ -9,7 +9,6 @@ export const KV_MEETING_PREFIX = "meeting:";
 export const KV_TOKEN_PREFIX = "token:";
 export const KV_ALIAS_PREFIX = "alias:";
 export const KV_EMAIL_TO_ALIAS_PREFIX = "email_alias:";
-export const DEFAULT_USER_KEY = "__default__";
 export const COOKIE_NAME = "meet_session";
 
 export const APP_NAME = "meet";

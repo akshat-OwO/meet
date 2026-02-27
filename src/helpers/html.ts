@@ -13,3 +13,15 @@ export function getBaseUrl(c: { req: { url: string } }): string {
   const url = new URL(c.req.url);
   return `${url.protocol}//${url.host}`;
 }
+
+/** Extract the domain from an email address. */
+export function getDomain(email: string): string {
+  const at = email.lastIndexOf("@");
+  if (at === -1) return "";
+  return email.slice(at + 1).toLowerCase();
+}
+
+/** Check if an email is a public (gmail.com) address. */
+export function isPublicEmail(email: string): boolean {
+  return getDomain(email) === "gmail.com";
+}

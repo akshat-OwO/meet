@@ -1,6 +1,6 @@
 import { Hono } from "hono";
-import { DEFAULT_USER_KEY } from "../constants";
 import { getSession, getAccessToken, updateSessionCookie } from "../helpers/auth";
+import { getDomain, isPublicEmail } from "../helpers/html";
 import {
   listMeetings,
   getMeeting,
@@ -22,30 +22,24 @@ const meetRoutes = new Hono<{ Bindings: CloudflareBindings }>();
  * GET /
  *
  * ?owner=<alias> — direct link to a specific user's meeting via opaque alias:
- *   - Resolves the alias to the owner's email
- *   - Looks up the owner's stored refresh token from KV
- *   - If owner's meeting exists, redirect immediately
- *   - If not, create one using owner's token, then redirect
- *   - If alias is invalid or owner has never signed in, show error
+ *   - Always works regardless of org boundaries
+ *   - Resolves alias → email → stored token → meeting (create if needed)
  *
- * No ?owner (logged-in user):
- *   - List all meetings, auto-create user's if missing
- *   - 1 meeting → instant redirect, multiple → selection UI with auto-redirect
- *
- * No ?owner (not logged in):
- *   - List all meetings
- *   - 0 meetings → create with env fallback
- *   - 1 → redirect, multiple → selection UI (no auto-redirect)
+ * No ?owner — visibility depends on user type:
+ *   - Logged out: public (gmail.com) meetings only. Empty → sign-in CTA.
+ *   - Gmail user: public meetings only. Auto-creates own if missing.
+ *   - Org user: same-domain meetings by default. ?public=1 shows public meetings.
+ *     Auto-creates own if missing.
  */
 meetRoutes.get("/", async (c) => {
   const { MEET_KV } = c.env;
   const session = await getSession(c);
   const ownerAlias = c.req.query("owner");
+  const showPublic = c.req.query("public") === "1";
 
   try {
-    // --- ?owner=<alias> direct link ---
+    // --- ?owner=<alias> direct link (always works, no org filtering) ---
     if (ownerAlias) {
-      // Resolve alias to email
       const ownerEmail = await getEmailByAlias(MEET_KV, ownerAlias);
       if (!ownerEmail) {
         return c.html(
@@ -58,7 +52,6 @@ meetRoutes.get("/", async (c) => {
         );
       }
 
-      // Check if the owner has a stored refresh token
       const storedToken = await getStoredToken(MEET_KV, ownerEmail);
       if (!storedToken) {
         return c.html(
@@ -71,13 +64,11 @@ meetRoutes.get("/", async (c) => {
         );
       }
 
-      // Check if the owner already has a meeting for today
       const existing = await getMeeting(MEET_KV, ownerEmail);
       if (existing) {
         return c.html(redirectPage(existing.url));
       }
 
-      // Create a meeting on the owner's behalf using their stored token
       const { entry } = await createAndStoreMeeting(
         MEET_KV,
         storedToken.refreshToken,
@@ -89,56 +80,96 @@ meetRoutes.get("/", async (c) => {
       return c.html(redirectPage(entry.url));
     }
 
-    // --- Normal / behavior ---
-    let meetings = await listMeetings(MEET_KV);
+    // --- Normal / behavior with org/public filtering ---
+    const allMeetings = await listMeetings(MEET_KV);
 
-    if (session) {
-      // Logged-in user
-      const userMeeting = meetings.find((m) => m.email === session.email);
+    if (!session) {
+      // Logged out — show public meetings only
+      const publicMeetings = allMeetings.filter((m) => isPublicEmail(m.email));
 
-      if (!userMeeting) {
-        const { entry, newRefreshToken } = await createAndStoreMeeting(
-          MEET_KV,
-          session.refreshToken,
-          c.env.GOOGLE_CLIENT_ID,
-          c.env.GOOGLE_CLIENT_SECRET,
-          session.email,
-          session.name
+      if (publicMeetings.length === 0) {
+        return c.html(
+          selectionPage([], null, false, null, null)
         );
-        meetings.push(entry);
-
-        // Update cookie if token was rotated
-        if (newRefreshToken) {
-          await updateSessionCookie(c, session, newRefreshToken);
-        }
       }
 
-      if (meetings.length === 1) {
-        return c.html(redirectPage(meetings[0].url));
+      if (publicMeetings.length === 1) {
+        return c.html(redirectPage(publicMeetings[0].url));
       }
 
-      const userAlias = await getOrCreateAlias(MEET_KV, session.email);
-      return c.html(selectionPage(meetings, session.email, true, userAlias));
-    } else {
-      // Not logged in
-      if (meetings.length === 0) {
-        const { entry } = await createAndStoreMeeting(
-          MEET_KV,
-          c.env.GOOGLE_REFRESH_TOKEN,
-          c.env.GOOGLE_CLIENT_ID,
-          c.env.GOOGLE_CLIENT_SECRET,
-          DEFAULT_USER_KEY,
-          "Default"
-        );
-        meetings.push(entry);
-      }
-
-      if (meetings.length === 1) {
-        return c.html(redirectPage(meetings[0].url));
-      }
-
-      return c.html(selectionPage(meetings, null, false));
+      return c.html(selectionPage(publicMeetings, null, false));
     }
+
+    // --- Logged-in user ---
+    const userDomain = getDomain(session.email);
+    const userIsPublic = isPublicEmail(session.email);
+
+    // Determine which meetings to show based on user type and ?public param
+    let visibleMeetings: typeof allMeetings;
+    let orgDomain: string | null = null;
+
+    if (userIsPublic) {
+      // Gmail user — always sees public meetings
+      visibleMeetings = allMeetings.filter((m) => isPublicEmail(m.email));
+    } else if (showPublic) {
+      // Org user viewing public meetings via ?public=1
+      visibleMeetings = allMeetings.filter((m) => isPublicEmail(m.email));
+      orgDomain = userDomain; // Still pass orgDomain so UI can show "back to org" link
+    } else {
+      // Org user default view — same domain only
+      visibleMeetings = allMeetings.filter(
+        (m) => getDomain(m.email) === userDomain
+      );
+      orgDomain = userDomain;
+    }
+
+    // Auto-create user's meeting if it doesn't exist yet
+    const userMeetingExists = allMeetings.some(
+      (m) => m.email === session.email
+    );
+
+    if (!userMeetingExists) {
+      const { entry, newRefreshToken } = await createAndStoreMeeting(
+        MEET_KV,
+        session.refreshToken,
+        c.env.GOOGLE_CLIENT_ID,
+        c.env.GOOGLE_CLIENT_SECRET,
+        session.email,
+        session.name
+      );
+
+      if (newRefreshToken) {
+        await updateSessionCookie(c, session, newRefreshToken);
+      }
+
+      // Add to visible list only if it passes the current filter
+      const entryIsPublic = isPublicEmail(entry.email);
+      const entryDomain = getDomain(entry.email);
+
+      if (userIsPublic && entryIsPublic) {
+        visibleMeetings.push(entry);
+      } else if (!userIsPublic && showPublic && entryIsPublic) {
+        visibleMeetings.push(entry);
+      } else if (!userIsPublic && !showPublic && entryDomain === userDomain) {
+        visibleMeetings.push(entry);
+      }
+    }
+
+    if (visibleMeetings.length === 1) {
+      return c.html(redirectPage(visibleMeetings[0].url));
+    }
+
+    const userAlias = await getOrCreateAlias(MEET_KV, session.email);
+    return c.html(
+      selectionPage(
+        visibleMeetings,
+        session.email,
+        true,
+        userAlias,
+        orgDomain,
+        showPublic
+      )
+    );
   } catch (err: any) {
     console.error("Failed to create meeting:", err);
     return c.html(
@@ -154,23 +185,23 @@ meetRoutes.get("/", async (c) => {
 
 /**
  * GET /new
- * Always create a fresh meeting (not stored in KV).
+ * Always create a fresh meeting (not stored in KV). Requires authentication.
  */
 meetRoutes.get("/new", async (c) => {
-  try {
-    const session = await getSession(c);
-    const refreshToken = session
-      ? session.refreshToken
-      : c.env.GOOGLE_REFRESH_TOKEN;
+  const session = await getSession(c);
+  if (!session) {
+    return c.redirect("/login");
+  }
 
+  try {
     const { accessToken, newRefreshToken } = await getAccessToken(
-      refreshToken,
+      session.refreshToken,
       c.env.GOOGLE_CLIENT_ID,
       c.env.GOOGLE_CLIENT_SECRET
     );
 
     // Persist rotated refresh token if present and update cookie
-    if (newRefreshToken && session) {
+    if (newRefreshToken) {
       await Promise.all([
         storeToken(c.env.MEET_KV, session.email, newRefreshToken, session.name),
         updateSessionCookie(c, session, newRefreshToken),
