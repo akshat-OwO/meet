@@ -17,10 +17,15 @@ Multiple users can sign in with Google — each gets their own daily meeting sto
 | Route | Behavior |
 |-------|----------|
 | `GET /` | List meetings, auto-create if needed, redirect or show selection UI |
+| `GET /?owner=<id>` | Direct link to a specific user's daily meeting (opaque alias, no email exposed) |
 | `GET /new` | Create a fresh meeting (not stored in KV), copy link, redirect |
+| `GET /me` | View your profile, email, and shareable direct link |
 | `GET /login` | Google OAuth consent screen |
 | `GET /callback` | OAuth token exchange, stores session cookie |
 | `GET /logout` | Clears session, redirects to `/` |
+| `GET /home` | Landing page explaining how the app works |
+| `GET /tnc` | Terms and Conditions |
+| `GET /privacy-policy` | Privacy Policy |
 | Cron `30 18 * * *` | Deletes all `meeting:*` keys from KV |
 
 ## Setup
@@ -84,5 +89,6 @@ pnpm deploy
 - Uses the Google Meet REST API directly (`POST https://meet.googleapis.com/v2/spaces`) — no SDK dependencies
 - User identity is extracted from the `id_token` JWT payload (decoded without verification since it's received directly from Google over HTTPS)
 - Session is stored in an HTTP-only `meet_session` cookie (30-day expiry)
-- KV keys are prefixed with `meeting:` (e.g., `meeting:user@example.com`)
+- KV keys are prefixed with `meeting:` (e.g., `meeting:user@example.com`), `token:` for refresh tokens, `alias:` and `email_alias:` for opaque user aliases
+- Direct links use opaque aliases (`?owner=a1b2c3d4`) instead of email addresses to prevent email enumeration
 - Zero static assets — the worker serves all HTML inline
